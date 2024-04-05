@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "main.h": "c"
+    },
+    "cmake.configureOnOpen": false,
+    "cortex-debug.variableUseNaturalFormat": false
+}

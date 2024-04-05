@@ -1,0 +1,27 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "shell",
+			"label": "build",
+			"command": "make",
+			"args": [
+			],
+			"group": "build",
+		},
+		{
+			"type": "shell",
+			"label": "download",
+			"command": "openocd",
+			"args": [
+				"-f",
+				"./Config/cmsis-dap.cfg",
+				"-f",
+				"./Config/stm32f1x.cfg",
+				"-c",
+				"program build/boot.elf verify reset exit"
+			],
+			"group": "build",
+		}
+	]
+}
