@@ -23,4 +23,10 @@ del *.tra /s
 del *.dep /s           
 del JLinkLog.txt /s
 
+del *.uvguix.* /s
+del *.uvoptx /s
+
+rd MDK-ARM\DebugConfig /s/q
+rd MDK-ARM\RTE /s/q
+
 exit

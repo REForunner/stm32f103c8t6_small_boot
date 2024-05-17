@@ -95,7 +95,7 @@ void prvJump(uint32_t sp, uint32_t pc)
 __asm static void prvJump(uint32_t sp, uint32_t pc)
 {
 	MOV SP, R0
-							BX R1
+	BX R1
 }
 #endif
 
@@ -123,10 +123,10 @@ static void prvUsartSendData(USART_TypeDef *xUsart, uint8_t *puc, uint32_t ulSiz
 static void prvUsartReceiveData(USART_TypeDef *xUsart, uint8_t *puc, uint32_t ulSize)
 {
 	/* check usart1 receive data */
-	while (!LL_USART_IsActiveFlag_RXNE(USART1))
+	while (!LL_USART_IsActiveFlag_RXNE(xUsart))
 		;
 	/* read data in usart data register */
-	*(puc++) = LL_USART_ReceiveData8(USART1);
+	*(puc++) = LL_USART_ReceiveData8(xUsart);
 }
 
 // crc check
@@ -218,7 +218,7 @@ int main(void)
 {
 	/* close all Interruption */
 	__ASM("CPSID	I");
-
+	
 #if 0
 	/* clear all sram */
 	uint32_t * ulp = (uint32_t *)RAM_BASE;
