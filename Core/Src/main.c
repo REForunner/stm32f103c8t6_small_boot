@@ -18,7 +18,12 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "usart.h"
+
+/*
+注意:
+1. 整个 boot 工程不应当使用 "全局变量, 静态变量, 堆" 等相关的处理功能
+
+*/
 
 /*
 程序结构:
@@ -26,63 +31,44 @@
 2. 程序结束位置的前一个字,存储当前程序的crc校验数据
 */
 
-// 程序信息结构体
-typedef struct xProgramInfo_t
+/*
+内存结构：
+
+*/
+
+// usart协议支持的命令(参考stm32自举协议)
+typedef enum xCommand_t
 {
-	uint16_t usStartAddress; // 程序起始地址,以扇区计
-	uint16_t usSize;				 // 程序大小,以扇区计
-} xProgramInfo_t;
+	Get,								//获取当前程序版本号,及命令列表
+	Get_ID = 0x02,			//获取芯片的id
+	Read_Memory = 0x11,	//读取指定地址
+	Go = 0x21,					//跳转到内部 Flash 或 SRAM 内的应用程序代码
+	Write_Memory = 0x31,//写指定地址
+	Erase_Page = 0x43,	//扇区擦除
+	
+	CommandLimited = 0xFF,			//内存字节数限制
+} xCommand_t;
+// command list
+const xCommand_t xCommandList[] = { Get, Get_ID, Read_Memory, Go, Write_Memory, Erase_Page };
 
-// 引导信息结构体有效标志枚举
-typedef enum Effecient_t
+// defined frame header
+#define FH		((uint32_t)(0x7e524b45))//"~RKE"
+// defined ack
+#define ACK		((uint32_t)(0x394b))//"OK"
+// defined nack
+#define NACK	((uint32_t)(0x4e47))//"NG"
+// defined data buffer max size
+#define DATA_BUFFER_MAX_SIZE		((uint32_t)(0x200))
+// Package structure
+typedef struct xPackage_t
 {
-	eIsNo = 0xA55A,	 // 无效
-	eIsYes = 0xFFFF, // 有效
-
-	SizeLimit = 0xFFFF
-} Effecient_t;
-
-// 引导信息结构体
-typedef struct xBootInfo_t
-{
-	Effecient_t usIsNext;				 // 有效性标志
-															 // 0xFFFF: 当前结构体有效; 0xA55A: 当前结构体无效,需要查询下一个位置
-	uint16_t usExtend;					 // 扩展标志
-	xProgramInfo_t xBootlader;	 // bootloader引导信息
-	xProgramInfo_t xApplication; // boot引导信息
-	uint32_t usExtend2;					 // 额外的扩展标志
-} xBootInfo_t;
-
-// 程序的地址,大小信息结构体
-typedef struct xProgramRealInfo_t
-{
-	uint32_t *ulBootBase; // boot 起始地址
-	uint32_t ulBootSize;	// boot 大小
-	uint32_t *ulAppBase;	// app 起始地址
-	uint32_t ulAppSize;		// app 大小
-} xProgramRealInfo_t;
-
-// bootinfo结构体大小
-#define BootInfo_STRUCT_SIZE sizeof(BootInfo_t)
-
-// 根据程序引导信息,找到存储crc校验值的地址
-#define FIND_CRC_ADR(start, size) (((uint32_t)start + (uint32_t)size - 4UL) & 0xFFFFFFFBUL)
-
-// FLASH定义
-#define FLASH_ADDRESS_BASE ((uint32_t)0x08000000)
-#define FLASH_SIZE ((uint32_t)0x00010000)
-#define FLASH_END ((uint32_t)(FLASH_ADDRESS_BASE + FLASH_SIZE))
-// SRAM定义
-#define RAM_BASE ((uint32_t)0x20000000)
-#define RAM_SIZE ((uint32_t)0x00005000)
-#define RAM_END ((uint32_t)(RAM_BASE + RAM_SIZE))
-// 引导信息存储区定义
-#define PAGE_SIZE ((uint32_t)0x00000400)														 //	1K
-#define ENTRY_OFFSET ((uint32_t)0x00000001)													 // 程序入口相对程序起始地址的偏移量
-#define FLASH_START_BASE ((uint32_t)0x08000000)											 // flash 起始地址
-#define BOOT_INFO_START ((uint32_t)0x08000400)											 // info 起始地址
-#define BOOT_INFO_SIZE ((uint32_t)0x00000400)												 // info 大小
-#define BOOT_INFO_END ((uint32_t)(BOOT_INFO_START + BOOT_INFO_SIZE)) // info 结束地址
+	uint32_t usFrameHeader;	// must be "~RKE"
+	uint32_t ulDataSize;		// data size include : command, data, and checksum
+													// but except self.
+	uint32_t ucCheckSum;		// check sum
+	xCommand_t xCommand;		// command id
+	uint32_t pulData[DATA_BUFFER_MAX_SIZE];				// data
+} xPackage_t;
 
 // jump to target address
 #if defined(__GNUC__)
@@ -122,11 +108,15 @@ static void prvUsartSendData(USART_TypeDef *xUsart, uint8_t *puc, uint32_t ulSiz
 // ulSize: data size of byte
 static void prvUsartReceiveData(USART_TypeDef *xUsart, uint8_t *puc, uint32_t ulSize)
 {
-	/* check usart1 receive data */
-	while (!LL_USART_IsActiveFlag_RXNE(xUsart))
-		;
-	/* read data in usart data register */
-	*(puc++) = LL_USART_ReceiveData8(xUsart);
+	/* loop receive data */
+	while (ulSize--)
+	{
+		/* check usart1 receive data */
+		while (!LL_USART_IsActiveFlag_RXNE(xUsart))
+			;
+		/* read data in usart data register */
+		*(puc++) = LL_USART_ReceiveData8(xUsart);
+	}
 }
 
 // crc check
@@ -193,21 +183,25 @@ static void prvConfigUsart1(void)
 	LL_GPIO_SetPinOutputType(GPIOA, LL_GPIO_PIN_9, LL_GPIO_OUTPUT_PUSHPULL);
 	LL_GPIO_SetPinMode(GPIOA, LL_GPIO_PIN_10, LL_GPIO_MODE_FLOATING);
 
-	//	LL_USART_InitTypeDef USART_InitStruct = { 0 };
-	//	USART_InitStruct.BaudRate = 115200;
-	//	USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
-	//	USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
-	//	USART_InitStruct.Parity = LL_USART_PARITY_NONE;
-	//	USART_InitStruct.TransferDirection = LL_USART_DIRECTION_TX_RX;
-	//	USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
-	//	USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
-
+#if 0
+	LL_USART_InitTypeDef USART_InitStruct = { 0 };
+	USART_InitStruct.BaudRate = 115200;
+	USART_InitStruct.DataWidth = LL_USART_DATAWIDTH_8B;
+	USART_InitStruct.StopBits = LL_USART_STOPBITS_1;
+	USART_InitStruct.Parity = LL_USART_PARITY_NONE;
+	USART_InitStruct.TransferDirection = LL_USART_DIRECTION_TX_RX;
+	USART_InitStruct.HardwareFlowControl = LL_USART_HWCONTROL_NONE;
+	USART_InitStruct.OverSampling = LL_USART_OVERSAMPLING_16;
+	LL_USART_Init(USART1, &USART_InitStruct);
+  LL_USART_ConfigAsyncMode(USART1);
+#else
 	/* usart1 hardware config */
 	USART1->CR1 = 0x0000200CUL;
 	USART1->CR2 = 0UL;
 	USART1->CR3 = 0UL;
 	/* config usart1 baudrate */
 	USART1->BRR = 0x00000045;
+#endif
 }
 
 /**
@@ -218,7 +212,7 @@ int main(void)
 {
 	/* close all Interruption */
 	__ASM("CPSID	I");
-	
+		
 #if 0
 	/* clear all sram */
 	uint32_t * ulp = (uint32_t *)RAM_BASE;
@@ -239,14 +233,14 @@ int main(void)
 
 	while (eIsNo == xpBoot->usIsNext && (uint32_t)xpBoot < BOOT_INFO_END)
 	{
-		// do something
+		// do something...
 		xpBoot++;
 	}
 
 	/* Verify the boot address */
 	if ((uint32_t)xpBoot < BOOT_INFO_END)
 	{
-		xProgramRealInfo_t xRealInfo = {0};
+		xProgramRealInfo_t xRealInfo = { 0 };
 		/* boot start address */
 		xRealInfo.ulBootBase = (uint32_t *)(((uint32_t)(xpBoot->xBootlader.usStartAddress) * PAGE_SIZE) + FLASH_START_BASE);
 		/* boot size */
@@ -289,21 +283,21 @@ int main(void)
 				*/
 				switch (LL_RTC_BKP_GetRegister(BKP, LL_RTC_BKP_DR1))
 				{
-				case 0x0102:
-				{
-					/* jump to app */
-					prvJump(*(xRealInfo.ulAppBase), *(xRealInfo.ulAppBase + 4));
-				}
-				break;
-				case 0x0201:
-				{
-					/* jump to boot */
-					prvJump(*(xRealInfo.ulBootBase), *(xRealInfo.ulBootBase + 4));
-				}
-				break;
-				default:
-					/* illegal */
+					case 0x0102:
+					{
+						/* jump to app */
+						prvJump(*(xRealInfo.ulAppBase), *(xRealInfo.ulAppBase + 4));
+					}
 					break;
+					case 0x0201:
+					{
+						/* jump to boot */
+						prvJump(*(xRealInfo.ulBootBase), *(xRealInfo.ulBootBase + 4));
+					}
+					break;
+					default:
+						/* illegal */
+						break;
 				}
 			}
 			/* pin reset, POR/PDR reset, Low-power reset is normal start */
@@ -314,6 +308,7 @@ int main(void)
 				prvJump(*(xRealInfo.ulAppBase), *(xRealInfo.ulAppBase + 4));
 			}
 			/* other reset is wrong!!! */
+			//do something...
 		}
 	}
 
@@ -325,9 +320,25 @@ StartUpFail:
 	/* boot/app are error */
 	while (1)
 	{
-		uint8_t val = 0;
-		prvUsartReceiveData(USART1, &val, 1UL);
-		prvUsartSendData(USART1, &val, 1UL);
+		xPackage_t xPackage =
+		{
+			.usFrameHeader = 0
+		};
+		
+		/* wait receive frame header (~RKE) */
+		while((uint32_t)FH != xPackage.usFrameHeader)
+		{
+			xPackage.usFrameHeader = 0;
+			xPackage.ulDataSize = 0;
+			/* receive use uart */
+			prvUsartReceiveData(USART1, (uint8_t *)&xPackage.usFrameHeader, 
+													(sizeof(xPackage.usFrameHeader) + sizeof(xPackage.ulDataSize)));
+		}
+		/* start receive */
+		prvUsartReceiveData(USART1, (uint8_t *)&xPackage.ucCheckSum, xPackage.ulDataSize);
+
+
+		//prvUsartSendData(USART1, &val, 1UL);
 	}
 }
 
